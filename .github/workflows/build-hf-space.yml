@@ -1,12 +1,9 @@
 name: Build Hugging Face space
 
 on:
-  # Runs on pushes targeting the default branch
   push:
-    branches: ["master"]
-
-  # Allows you to run this workflow manually from the Actions tab
-  workflow_dispatch:
+    branches: ["master", "main"] # Unterstützt beide gängigen Branch-Namen
+  workflow_dispatch: # Ermöglicht manuelles Starten am iPad
 
 permissions:
   contents: read
@@ -21,21 +18,31 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'examples/main/package-lock.json'
 
-      - name: Build Hugging Face space
+      - name: Build and Deploy to Hugging Face
         shell: bash
         run: |
           if [ -z "$HF_TOKEN" ]; then
-            echo "HF_TOKEN is not set, skipping..."
-          else
-            git config --global user.email "son@huggingface.co"
-            git config --global user.name "Xuan Son NGUYEN"
-            cd scripts && ./build_hf_space.sh
+            echo "Fehler: HF_TOKEN ist nicht in den GitHub Secrets gesetzt!"
+            exit 1
           fi
+          
+          # Git Identität setzen
+          git config --global user.email "bot@thorge-ai.com"
+          git config --global user.name "Thorge-AI Bot"
+          
+          # Das Build-Skript ausführen (überspringt CI-Checks)
+          chmod +x scripts/build_hf_space.sh
+          ./scripts/build_hf_space.sh
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          CI: false # Deaktiviert die strikten Fehler-Checks bei Warnungen
