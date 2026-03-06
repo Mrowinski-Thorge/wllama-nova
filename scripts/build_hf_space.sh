@@ -2,29 +2,44 @@
 
 set -e
 
-# 1. Den Frontend-Build in GitHub Actions ausführen
-echo ">>> building frontend in github"
-cd examples/main
-npm install
-npm run build
-cd ../..
+# 1. Sicherstellen, dass wir im Hauptverzeichnis des Repos starten
+# (Das Skript liegt in /scripts, also gehen wir eine Ebene hoch)
+cd "$(dirname "$0")/.."
+ROOT_DIR=$(pwd)
 
-# 2. Den Hugging Face Space klonen
+echo ">>> Aktuelles Verzeichnis: $ROOT_DIR"
+
+# 2. Den Frontend-Build in GitHub Actions ausführen
+echo ">>> building frontend in github"
+if [ -d "examples/main" ]; then
+  cd examples/main
+  npm install
+  npm run build
+  cd "$ROOT_DIR"
+else
+  echo "FEHLER: Verzeichnis examples/main nicht gefunden!"
+  exit 1
+fi
+
+# 3. Den Hugging Face Space klonen
 echo ">>> clone hf space"
 rm -rf _tmp_hf_space
 git clone https://Thorge-AI:${HF_TOKEN}@huggingface.co/spaces/Thorge-AI/wllama-Nova.ai --depth 1 _tmp_hf_space
 
-# 3. Die neu gebauten Dateien von GitHub nach HF kopieren
+# 4. Die neu gebauten Dateien kopieren
 echo ">>> copying build artifacts"
-# Wir kopieren den Inhalt des 'dist' Ordners (Ergebnis von npm run build) 
-# direkt in das Hauptverzeichnis des HF Spaces
-cp -r examples/main/dist/* _tmp_hf_space/
+# Prüfen, ob der Build-Ordner existiert (Vite nutzt meist 'dist')
+if [ -d "examples/main/dist" ]; then
+  cp -r examples/main/dist/* _tmp_hf_space/
+else
+  echo "FEHLER: Build-Ausgabe (dist) nicht gefunden!"
+  exit 1
+fi
 
-# 4. Hochladen zu Hugging Face
+# 5. Hochladen zu Hugging Face
 echo ">>> push to hf"
 cd _tmp_hf_space
 
-# Konfiguration (falls noch nicht global gesetzt)
 git config user.email "bot@thorge-ai.com"
 git config user.name "Thorge-AI Bot"
 
@@ -38,7 +53,7 @@ git commit -m "update: native wikipedia and memory management"
 git push
 
 echo ">>> clean up"
-cd ..
+cd "$ROOT_DIR"
 rm -rf _tmp_hf_space
 
 echo ">>> done"
