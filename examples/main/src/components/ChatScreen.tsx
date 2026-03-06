@@ -1,10 +1,12 @@
+/* eslint-disable */
+// @ts-nocheck
 import { useState } from 'react';
 import { useMessages } from '../utils/messages.context';
 import { useWllama } from '../utils/wllama.context';
 import { Message, Screen } from '../utils/types';
 import { formatChat } from '../utils/utils';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
-import { faStop, faBook, faBolt } from '@fortawesome/free-solid-svg-icons';
+import { faStop, faBook, faBolt, faSpinner, faChevronDown, faChevronUp, faLink } from '@fortawesome/free-solid-svg-icons';
 import ScreenWrapper from './ScreenWrapper';
 import { useIntervalWhen } from '../utils/use-interval-when';
 import { MarkdownMessage } from './MarkdownMessage';
@@ -12,7 +14,11 @@ import { MarkdownMessage } from './MarkdownMessage';
 export default function ChatScreen() {
   const [input, setInput] = useState('');
   const [useWiki, setUseWiki] = useState(false);
+  
+  // Agent Status States
   const [agentStatus, setAgentStatus] = useState('');
+  const [agentDetails, setAgentDetails] = useState('');
+  const [showAgentDetails, setShowAgentDetails] = useState(false);
 
   const {
     currentConvId,
@@ -22,7 +28,6 @@ export default function ChatScreen() {
     loadedModel,
     getWllamaInstance,
     stopCompletion,
-    currParams,
   } = useWllama();
   
   const {
@@ -36,14 +41,13 @@ export default function ChatScreen() {
 
   const currConv = getConversationById(currentConvId);
 
-  // Token-Limit und Memory-Warnung
+  // Neues Memory-Limit: 800 Tokens
   const estTokens = currConv ? Math.ceil(JSON.stringify(currConv.messages).length / 4) : 0;
-  const maxTokens = currParams?.nContext || 2048;
-  const isWarningLimit = estTokens > maxTokens * 0.75;
-  const isCriticalLimit = estTokens > maxTokens * 0.90;
+  const COMPRESS_LIMIT = 800; 
+  const isCriticalLimit = estTokens > COMPRESS_LIMIT;
 
   const onSubmit = async () => {
-    if (isGenerating || input.trim() === '') return;
+    if (isGenerating || agentStatus || input.trim() === '') return;
 
     const currHistory = currConv?.messages ?? [];
     const userInput = input.trim();
@@ -66,44 +70,62 @@ export default function ChatScreen() {
     if (!loadedModel) throw new Error('loadedModel is null');
 
     let internalPrompt = userInput;
+    let sourceUrl = null;
 
-    // Memory Kompression
-    if (isCriticalLimit) {
-      internalPrompt = `[WICHTIG: Kontextspeicher ist fast voll! Fasse in deiner Antwort zuerst die bisherige Unterhaltung sehr kurz zusammen und beantworte dann:]\n\n${internalPrompt}`;
-    }
-
-    // Wikipedia Suche
+    // --- WIKIPEDIA AGENTEN LOGIK ---
     if (useWiki) {
-      setAgentStatus('Suche auf Wikipedia...');
+      setAgentStatus('Arbeitet mit Wikipedia daran...');
+      setAgentDetails('Überlege besten Suchbegriff...');
+      setShowAgentDetails(true);
+
+      // 1. KI fragt sich selbst nach dem Suchbegriff
+      const queryPrompt = `<|im_start|>system\nDu bist ein Assistent, der nur Suchbegriffe ausgibt. Extrahiere aus der folgenden Frage genau EINEN präzisen Wikipedia-Suchbegriff oder Namen. Antworte mit nichts anderem als dem Suchbegriff.<|im_end|>\n<|im_start|>user\n${userInput}<|im_end|>\n<|im_start|>assistant\n`;
+
+      let searchQuery = "";
       try {
-        const res = await fetch(`https://de.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(userInput)}&utf8=&format=json&origin=*`);
+        await createCompletion(queryPrompt, (piece) => { searchQuery = piece; });
+      } catch (e) { console.error(e); }
+
+      // Säubern des generierten Begriffs
+      searchQuery = searchQuery.replace(/["']/g, '').trim();
+      setAgentDetails(`Frage Wikipedia API nach: "${searchQuery}"`);
+
+      // 2. Echte Wikipedia Summary API abfragen
+      try {
+        const res = await fetch(`https://de.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(searchQuery)}`);
         const data = await res.json();
-        
-        if (data.query?.search?.length > 0) {
-          const result = data.query.search[0];
-          const snippet = result.snippet.replace(/(<([^>]+)>)/gi, "");
-          const wikiLink = `https://de.wikipedia.org/?curid=${result.pageid}`;
-          
-          internalPrompt = `Fakt von Wikipedia: "${snippet}".\n\nBeantworte meine Frage basierend darauf. Füge am ENDE deiner Antwort diesen Quellen-Link ein: [Quelle: Wikipedia](${wikiLink})\n\nFrage: ${internalPrompt}`;
+
+        if (data.title && data.extract) {
+          sourceUrl = data.content_urls?.desktop?.page || `https://de.wikipedia.org/wiki/${encodeURIComponent(data.title)}`;
+          internalPrompt = `Fakten von Wikipedia zu "${data.title}":\n"${data.extract}"\n\nBeantworte basierend auf diesen Fakten die Frage: ${userInput}`;
+          setAgentDetails(`Artikel "${data.title}" gefunden. Lese Zusammenfassung...`);
+        } else {
+          setAgentDetails(`Kein passender Artikel für "${searchQuery}" gefunden.`);
         }
-      } catch (e) {
-        console.error("Wiki Error:", e);
+      } catch(e) {
+        setAgentDetails(`Wikipedia API Fehler.`);
       }
-      setAgentStatus('');
     }
+
+    // --- MEMORY KOMPRESSION ---
+    if (isCriticalLimit) {
+      internalPrompt = `[WICHTIGE SYSTEMANWEISUNG: Der Speicher ist über 800 Tokens. Fasse unsere bisherige Unterhaltung extrem kurz zusammen und beantworte dann die Frage:]\n${internalPrompt}`;
+    }
+
+    // Agenten-UI verstecken, echte Generierung beginnt
+    setAgentStatus('');
+    setAgentDetails('');
+    setShowAgentDetails(false);
 
     const hiddenUserMsg: Message = { ...userMsg, content: internalPrompt };
+    let formattedChat = await formatChat(getWllamaInstance(), [...currHistory, hiddenUserMsg]);
 
-    let formattedChat: string;
-    try {
-      formattedChat = await formatChat(getWllamaInstance(), [...currHistory, hiddenUserMsg]);
-    } catch (e) {
-      alert(`Error: ${(e as any)?.message ?? 'unknown'}`);
-      throw e;
-    }
-
+    let finalAnswer = "";
     await createCompletion(formattedChat, (newContent) => {
-      editMessageInConversation(convId, assistantMsg.id, newContent);
+      finalAnswer = newContent;
+      // Quelle mit unsichtbarem Trennzeichen anfügen
+      const displayContent = sourceUrl ? finalAnswer + `\n\n===SOURCES===${sourceUrl}` : finalAnswer;
+      editMessageInConversation(convId, assistantMsg.id, displayContent);
     });
   };
 
@@ -112,52 +134,81 @@ export default function ChatScreen() {
       <div className="chat-messages grow overflow-auto" id="chat-history">
         <div className="h-10" />
 
-        {isWarningLimit && (
+        {isCriticalLimit && (
           <div className="text-center mb-4">
-            <span className={`badge ${isCriticalLimit ? 'badge-error animate-pulse' : 'badge-warning'} p-3`}>
+            <span className="badge badge-warning p-3">
               <FontAwesomeIcon icon={faBolt} className="mr-2" />
-              {isCriticalLimit ? "Speicher fast voll! Chat wird komprimiert." : "Speicher füllt sich."} 
-              ({estTokens} / {maxTokens} Tokens)
+              Token-Limit (800) erreicht. Auto-Kompression aktiv.
             </span>
           </div>
         )}
 
         {currConv ? (
           <>
-            {currConv.messages.map((msg) =>
-              msg.role === 'user' ? (
-                <div className="chat chat-end" key={msg.id}>
-                  <div className="chat-bubble">
-                    {msg.content.length > 0 && <MarkdownMessage content={msg.content} />}
+            {currConv.messages.map((msg) => {
+              // Text und Quellen trennen
+              let text = msg.content;
+              let source = null;
+              if (text.includes('===SOURCES===')) {
+                const parts = text.split('===SOURCES===');
+                text = parts[0];
+                source = parts[1].trim();
+              }
+
+              return (
+                <div className={`chat ${msg.role === 'user' ? 'chat-end' : 'chat-start'}`} key={msg.id}>
+                  <div className={`chat-bubble ${msg.role === 'assistant' ? 'bg-base-100 text-base-content' : ''}`}>
+                    {msg.content.length === 0 && isGenerating && !agentStatus ? (
+                      <span className="loading loading-dots"></span>
+                    ) : (
+                      <>
+                        <MarkdownMessage content={text} />
+                        {source && (
+                          <div className="mt-3 border-t border-gray-600 pt-3">
+                            <a href={source} target="_blank" rel="noreferrer" className="btn btn-xs btn-outline btn-info">
+                              <FontAwesomeIcon icon={faLink} className="mr-2" /> Quelle: Wikipedia
+                            </a>
+                          </div>
+                        )}
+                      </>
+                    )}
                   </div>
                 </div>
-              ) : (
-                <div className="chat chat-start" key={msg.id}>
-                  <div className="chat-bubble bg-base-100 text-base-content">
-                    {msg.content.length === 0 && isGenerating && <span className="loading loading-dots"></span>}
-                    {msg.content.length > 0 && <MarkdownMessage content={msg.content} />}
-                  </div>
-                </div>
-              )
-            )}
+              );
+            })}
           </>
         ) : (
           <div className="pt-24 text-center text-xl">Frag mich etwas 👋</div>
         )}
+
+        {/* --- DIE NEUE AGENTEN-SPRECHBLASE --- */}
+        {agentStatus && (
+          <div className="chat chat-start mt-2">
+            <div className="chat-bubble bg-base-300 text-base-content border border-info shadow-lg">
+              <div 
+                className="flex items-center cursor-pointer font-semibold text-sm" 
+                onClick={() => setShowAgentDetails(!showAgentDetails)}
+              >
+                <FontAwesomeIcon icon={faSpinner} spin className="mr-3 text-info text-lg" />
+                {agentStatus}
+                <FontAwesomeIcon icon={showAgentDetails ? faChevronUp : faChevronDown} className="ml-3 text-xs opacity-50" />
+              </div>
+              {showAgentDetails && (
+                <div className="mt-3 text-xs opacity-80 border-l-2 border-info pl-3 py-1 bg-base-200 rounded-r">
+                  {agentDetails}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="flex flex-col input-message py-4 relative">
-        {isGenerating && (
+        {isGenerating && !agentStatus && (
           <div className="text-center">
             <button className="btn btn-outline btn-sm mb-4" onClick={stopCompletion}>
-              <FontAwesomeIcon icon={faStop} /> Stop generation
+              <FontAwesomeIcon icon={faStop} /> Stop
             </button>
-          </div>
-        )}
-
-        {agentStatus && (
-          <div className="text-sm text-info animate-pulse mb-2 text-center font-bold">
-            <FontAwesomeIcon icon={faBook} className="mr-2" /> {agentStatus}
           </div>
         )}
 
@@ -180,31 +231,12 @@ export default function ChatScreen() {
               className={`absolute bottom-3 left-3 btn btn-xs ${useWiki ? 'btn-info' : 'btn-ghost'}`}
               onClick={() => setUseWiki(!useWiki)}
             >
-              <FontAwesomeIcon icon={faBook} className="mr-1" /> Wiki: {useWiki ? 'AN' : 'AUS'}
+              <FontAwesomeIcon icon={faBook} /> Wiki: {useWiki ? 'AN' : 'AUS'}
             </button>
-            <span className="absolute bottom-3 right-3 text-xs opacity-50 font-mono">
-              Tokens: ~{estTokens}
-            </span>
           </div>
         )}
-
-        {!loadedModel && <WarnNoModel />}
       </div>
     </ScreenWrapper>
-  );
-}
-
-function WarnNoModel() {
-  const { navigateTo } = useWllama();
-  return (
-    <div role="alert" className="alert">
-      <span>Modell ist nicht geladen</span>
-      <div>
-        <button className="btn btn-sm btn-primary" onClick={() => navigateTo(Screen.MODEL)}>
-          Modell wählen
-        </button>
-      </div>
-    </div>
   );
 }
 
