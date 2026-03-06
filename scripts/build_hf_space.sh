@@ -4,7 +4,7 @@ set -e
 
 echo ">>> clone"
 rm -rf _tmp_hf_space
-git clone https://ngxson:${HF_TOKEN}@huggingface.co/spaces/ngxson/wllama --depth 1 _tmp_hf_space
+git clone https://Thorge-AI:${HF_TOKEN}@huggingface.co/spaces/Thorge-AI/wllama-Nova.ai --depth 1 _tmp_hf_space
 
 echo ">>> build"
 cd _tmp_hf_space
